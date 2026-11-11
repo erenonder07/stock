@@ -5,6 +5,8 @@ on:
     # Her 15 dakikada bir otomatik çalışır
     - cron: '*/15 * * * *'
   workflow_dispatch: # GitHub arayüzünden manuel olarak tetikleme imkanı sağlar
+  push:
+    branches: [ main ]
 
 jobs:
   check-stock:
