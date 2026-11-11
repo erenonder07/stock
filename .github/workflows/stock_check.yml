@@ -2,8 +2,8 @@ name: AVVA Beden Stok Kontrolü
 
 on:
   schedule:
-    # Her 15 dakikada bir otomatik çalışır
-    - cron: '*/15 * * * *'
+    # Her 5 dakikada bir otomatik çalışır
+    - cron: '*/5 * * * *'
   workflow_dispatch: # GitHub arayüzünden manuel olarak tetikleme imkanı sağlar
   push:
     branches: [ main ]
