@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import time
 import logging
 import requests
 from bs4 import BeautifulSoup
@@ -232,9 +233,10 @@ def check_stock():
             if in_stock:
                 logger.info(f"🎉 MÜJDE! {TARGET_SIZE} bedeni STOKTA! Telegram bildirimi gönderiliyor...")
                 send_telegram_notification(PRODUCT_URL, TARGET_SIZE, product_title)
+                return True
             else:
                 logger.info(f"⏳ {TARGET_SIZE} bedeni şu anda stokta bulunmuyor (Tükenmiş).")
-            return
+                return False
 
     # YÖNTEM 2: Ticimax Product Detail Modeli
     model_result = check_ticimax_product_model(response.text, TARGET_SIZE)
@@ -244,9 +246,10 @@ def check_stock():
             if in_stock:
                 logger.info(f"🎉 MÜJDE! {TARGET_SIZE} bedeni STOKTA! Telegram bildirimi gönderiliyor...")
                 send_telegram_notification(PRODUCT_URL, TARGET_SIZE, product_title)
+                return True
             else:
                 logger.info(f"⏳ {TARGET_SIZE} bedeni şu anda stokta bulunmuyor (Tükenmiş).")
-            return
+                return False
 
     # YÖNTEM 3: DOM Elemanları Üzerinden Tarama
     candidate_elements = []
@@ -274,7 +277,7 @@ def check_stock():
 
     if not candidate_elements:
         logger.warning(f"Sayfada '{TARGET_SIZE}' bedeni tespit edilemedi!")
-        return
+        return False
 
     found_in_stock = False
     for elem in candidate_elements:
@@ -285,9 +288,22 @@ def check_stock():
     if found_in_stock:
         logger.info(f"🎉 MÜJDE! {TARGET_SIZE} bedeni stokta tespit edildi! Telegram bildirimi gönderiliyor...")
         send_telegram_notification(PRODUCT_URL, TARGET_SIZE, product_title)
+        return True
     else:
         logger.info(f"⏳ {TARGET_SIZE} bedeni şu anda stokta bulunmuyor (Tükenmiş / Pasif).")
+        return False
 
 
 if __name__ == "__main__":
-    check_stock()
+    CHECK_INTERVAL_SECONDS = 90  # 1.5 dakika
+    ITERATIONS_PER_RUN = 3       # Her 5 dakikalık tetiklemede 3 kez kontrol (0. sn, 90. sn, 180. sn)
+
+    for i in range(1, ITERATIONS_PER_RUN + 1):
+        logger.info(f"=== Kontrol Döngüsü {i}/{ITERATIONS_PER_RUN} ===")
+        is_in_stock = check_stock()
+        if is_in_stock:
+            logger.info("Ürün stokta bulundu ve Telegram bildirimi gönderildi. Döngü sonlandırılıyor.")
+            break
+        if i < ITERATIONS_PER_RUN:
+            logger.info(f"{CHECK_INTERVAL_SECONDS} saniye (1.5 dakika) bekleniyor...")
+            time.sleep(CHECK_INTERVAL_SECONDS)
