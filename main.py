@@ -21,7 +21,7 @@ PRODUCT_URL = os.environ.get(
 ).strip()
 
 TARGET_SIZE = os.environ.get("TARGET_SIZE", "L").strip().upper()
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "9175136192:AAGdTqs3slW6SVFm3nSloYepDudXwli2iZ0").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 
 OUT_OF_STOCK_CLASSES = {
@@ -48,7 +48,10 @@ OUT_OF_STOCK_TEXTS = [
 def send_telegram_notification(product_url: str, target_size: str, product_title: str = "") -> bool:
     """Stok bulundugunda Telegram uzerinden bildirim gonderir."""
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        logger.warning("TELEGRAM_TOKEN veya CHAT_ID tanimlanmamis! Telegram mesaji gonderilemedi.")
+        logger.warning(
+            f"Telegram bildirim gonderilemedi! "
+            f"(TELEGRAM_TOKEN: {'Var' if TELEGRAM_TOKEN else 'Eksik'}, CHAT_ID: {'Var' if CHAT_ID else 'Eksik'})"
+        )
         return False
 
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -83,14 +86,64 @@ def send_telegram_notification(product_url: str, target_size: str, product_title
         return False
 
 
+def check_schema_org_json_ld(soup: BeautifulSoup, target_size: str):
+    """
+    Sayfadaki schema.org ProductGroup JSON-LD verilerini tarar.
+    AVVA ve modern Ticimax sitelerinde varyantlar hasVariant listesinde yer alir.
+    """
+    for script in soup.find_all("script", type="application/ld+json"):
+        if not script.string:
+            continue
+        try:
+            data = json.loads(script.string)
+            if data.get("@type") == "ProductGroup":
+                variants = data.get("hasVariant", [])
+                for v in variants:
+                    size = str(v.get("size", "")).strip().upper()
+                    if size == target_size:
+                        offers = v.get("offers", {})
+                        availability = offers.get("availability", "")
+                        is_in_stock = "InStock" in availability
+                        logger.info(f"[JSON-LD] {target_size} bedeni bulundu. Durum: {availability} (Stokta: {is_in_stock})")
+                        return True, is_in_stock
+        except Exception as e:
+            logger.debug(f"JSON-LD parse hatasi: {e}")
+    return None
+
+
+def check_ticimax_product_model(html_text: str, target_size: str):
+    """
+    AVVA'nin kullandigi Ticimax 'productDetailModel' JavaScript nesnesinden
+    stok verilerini kesin olarak okur.
+    """
+    idx = html_text.find("var productDetailModel = ")
+    if idx != -1:
+        try:
+            sub = html_text[idx + len("var productDetailModel = "):]
+            obj, _ = json.JSONDecoder().raw_decode(sub)
+            variant_data = obj.get("productVariantData", [])
+            for item in variant_data:
+                # ekSecenekTipiTanim: 'Beden' veya tipID: 2
+                tip_tanim = str(item.get("ekSecenekTipiTanim", "")).lower()
+                tip_id = item.get("tipID")
+                if tip_tanim == "beden" or tip_id == 2:
+                    tanim = str(item.get("tanim", "")).strip().upper()
+                    if tanim == target_size:
+                        stock_qty = item.get("stokAdedi", 0)
+                        logger.info(f"[Ticimax Model] {target_size} bedeni bulundu. Stok Adedi: {stock_qty}")
+                        return True, (stock_qty > 0)
+        except Exception as e:
+            logger.debug(f"Ticimax model parse hatasi: {e}")
+    return None
+
+
 def is_element_out_of_stock(elem) -> bool:
     """Verilen HTML elemaninin veya ust kapsayicilarinin stok disi olup olmadigini kontrol eder."""
     current = elem
-    for _ in range(4):  # Kendisi ve 3 ust kapsayicisini tara
+    for _ in range(4):
         if current is None:
             break
 
-        # 1. HTML Class kontrolu
         classes = current.get("class", [])
         if isinstance(classes, list):
             class_str = " ".join(classes).lower()
@@ -101,22 +154,18 @@ def is_element_out_of_stock(elem) -> bool:
             if oos in class_str:
                 return True
 
-        # 2. HTML Nitelik (Attribute) kontrolu
         attrs = current.attrs
         if "disabled" in attrs:
             return True
 
-        # data-stock="0" veya data-stok="0" kontrolu
         data_stock = attrs.get("data-stock") or attrs.get("data-stok") or attrs.get("stock")
         if data_stock is not None and str(data_stock).strip() == "0":
             return True
 
-        # data-aktif="false" kontrolu
         data_active = attrs.get("data-aktif") or attrs.get("data-active")
         if data_active is not None and str(data_active).strip().lower() in ["false", "0"]:
             return True
 
-        # 3. Text / Title kontrolu
         title_attr = str(attrs.get("title", "")).lower()
         for oos_text in OUT_OF_STOCK_TEXTS:
             if oos_text in title_attr:
@@ -124,7 +173,6 @@ def is_element_out_of_stock(elem) -> bool:
 
         current = current.parent
 
-    # Metin iceriginde acikca tukendi yaziyor mu?
     elem_text = elem.get_text(separator=" ", strip=True).lower()
     for oos_text in OUT_OF_STOCK_TEXTS:
         if oos_text in elem_text:
@@ -133,37 +181,9 @@ def is_element_out_of_stock(elem) -> bool:
     return False
 
 
-def check_script_variants(soup: BeautifulSoup, target_size: str):
-    """
-    Sayfadaki script tag'lerinde yer alabilecek Ticimax / JSON varyant verilerini analiz eder.
-    Varsa (found: bool, in_stock: bool) doner, bulunamazsa None doner.
-    """
-    scripts = soup.find_all("script")
-    for script in scripts:
-        content = script.string or ""
-        if not content:
-            continue
-
-        # Ticimax varyant listesi veya json degiskenleri
-        if "subVariant" in content or "urunVaryant" in content or "ProductVariant" in content:
-            matches = re.findall(r'(\{[^{}]*?' + re.escape(target_size) + r'[^{}]*?\})', content)
-            for m in matches:
-                try:
-                    # Basit stok verisi yakalama
-                    stock_match = re.search(r'["\']?(?:Stock|StokAdedi|stok|stock)["\']?\s*:\s*(\d+)', m, re.IGNORECASE)
-                    if stock_match:
-                        stock_qty = int(stock_match.group(1))
-                        logger.info(f"Script icerisinde beden bulundu ({target_size}), stok adedi: {stock_qty}")
-                        return True, (stock_qty > 0)
-                except Exception:
-                    pass
-
-    return None
-
-
 def check_stock():
-    logger.info(f"Stok kontrolu baslatiliyor...")
-    logger.info(f"Urun URL: {PRODUCT_URL}")
+    logger.info("Stok kontrolü başlatılıyor...")
+    logger.info(f"Ürün URL: {PRODUCT_URL}")
     logger.info(f"Hedef Beden: {TARGET_SIZE}")
 
     headers = {
@@ -180,15 +200,15 @@ def check_stock():
 
     try:
         response = requests.get(PRODUCT_URL, headers=headers, timeout=20)
-        logger.info(f"HTTP Yanit Kodu: {response.status_code}")
+        logger.info(f"HTTP Yanıt Kodu: {response.status_code}")
         response.raise_for_status()
     except requests.RequestException as e:
-        logger.error(f"Sayfaya erisilirken HTTP hatasi meydana geldi: {e}")
+        logger.error(f"Sayfaya erişilirken HTTP hatası meydana geldi: {e}")
         sys.exit(1)
 
     soup = BeautifulSoup(response.content, "html.parser")
 
-    # Urun basligini bulma (opsiyonel)
+    # Ürün başlığı
     product_title = ""
     title_elem = (
         soup.find("h1", class_=re.compile(r"product.*title|title", re.I))
@@ -197,37 +217,38 @@ def check_stock():
     )
     if title_elem:
         product_title = title_elem.get_text(strip=True)
-        logger.info(f"Urun Adi: {product_title}")
+        logger.info(f"Ürün Adı: {product_title}")
 
-    # Oncelikle script varyant verisi kontrolu
-    script_result = check_script_variants(soup, TARGET_SIZE)
-    if script_result is not None:
-        size_found, in_stock = script_result
-        if size_found and in_stock:
-            logger.info(f"Tebrikler! {TARGET_SIZE} bedeni script verilerine gore STOKTA!")
-            send_telegram_notification(PRODUCT_URL, TARGET_SIZE, product_title)
-            return
-        elif size_found and not in_stock:
-            logger.info(f"{TARGET_SIZE} bedeni script verilerine gore stokta yok (Tukenmis).")
+    # YÖNTEM 1: Schema.org JSON-LD verisi
+    ld_result = check_schema_org_json_ld(soup, TARGET_SIZE)
+    if ld_result is not None:
+        size_found, in_stock = ld_result
+        if size_found:
+            if in_stock:
+                logger.info(f"🎉 MÜJDE! {TARGET_SIZE} bedeni STOKTA! Telegram bildirimi gönderiliyor...")
+                send_telegram_notification(PRODUCT_URL, TARGET_SIZE, product_title)
+            else:
+                logger.info(f"⏳ {TARGET_SIZE} bedeni şu anda stokta bulunmuyor (Tükenmiş).")
             return
 
-    # DOM elemanlari uzerinden varyant/beden arama
+    # YÖNTEM 2: Ticimax Product Detail Modeli
+    model_result = check_ticimax_product_model(response.text, TARGET_SIZE)
+    if model_result is not None:
+        size_found, in_stock = model_result
+        if size_found:
+            if in_stock:
+                logger.info(f"🎉 MÜJDE! {TARGET_SIZE} bedeni STOKTA! Telegram bildirimi gönderiliyor...")
+                send_telegram_notification(PRODUCT_URL, TARGET_SIZE, product_title)
+            else:
+                logger.info(f"⏳ {TARGET_SIZE} bedeni şu anda stokta bulunmuyor (Tükenmiş).")
+            return
+
+    # YÖNTEM 3: DOM Elemanları Üzerinden Tarama
     candidate_elements = []
-
-    # Olası beden secenekleri tag ve class'lari (Ticimax ve genel e-ticaret kaliplari)
     selectors = [
-        "li.subvariant-item",
-        "li.variant-item",
-        "div.subvariant-item",
-        "a.subvariant-item",
-        "div.variant-box",
-        "div.size-box",
-        "option",
-        "button",
-        "a",
-        "span",
-        "div",
-        "li"
+        "li.subvariant-item", "li.variant-item", "div.subvariant-item",
+        "a.subvariant-item", "div.variant-box", "div.size-box",
+        "option", "button", "a", "span", "div", "li"
     ]
 
     for sel in selectors:
@@ -237,43 +258,30 @@ def check_stock():
             data_val = str(elem.get("data-value", "")).strip().upper()
             data_title = str(elem.get("data-title", "")).strip().upper()
 
-            # Tam kelime veya tam eslesme kontrolu
             is_match = False
             if text == TARGET_SIZE or val == TARGET_SIZE or data_val == TARGET_SIZE or data_title == TARGET_SIZE:
                 is_match = True
             elif re.search(rf"\b{re.escape(TARGET_SIZE)}\b", text):
-                # Beden kelimesi iceriyorsa (ornegin "L Beden", "Beden: L")
-                # Fakat "XL", "XXL" gibi bedenlerin "L" ile karismamasi icin \b kullanildi
                 is_match = True
 
             if is_match:
                 candidate_elements.append(elem)
 
     if not candidate_elements:
-        logger.warning(
-            f"Sayfada '{TARGET_SIZE}' bedeni tespit edilemedi! "
-            f"Beden hic listelenmiyor veya urun sayfasi dinamik yukleniyor olabilir."
-        )
+        logger.warning(f"Sayfada '{TARGET_SIZE}' bedeni tespit edilemedi!")
         return
 
-    logger.info(f"'{TARGET_SIZE}' bedeni icin {len(candidate_elements)} olasi DOM elemani bulundu. Stok durumlari denetleniyor...")
-
-    # Aday elemanlarin stok durumlarini incele
     found_in_stock = False
     for elem in candidate_elements:
-        out_of_stock = is_element_out_of_stock(elem)
-        if not out_of_stock:
+        if not is_element_out_of_stock(elem):
             found_in_stock = True
-            logger.info(f"Eleman stokta gorunuyor! Tag: <{elem.name} class='{elem.get('class', [])}'>")
             break
-        else:
-            logger.info(f"Eleman stok disi (passive/disabled) olarak tespit edildi: <{elem.name} class='{elem.get('class', [])}'>")
 
     if found_in_stock:
-        logger.info(f"🎉 MÜJDE! {TARGET_SIZE} bedeni stokta tespit edildi! Telegram bildirimi gonderiliyor...")
+        logger.info(f"🎉 MÜJDE! {TARGET_SIZE} bedeni stokta tespit edildi! Telegram bildirimi gönderiliyor...")
         send_telegram_notification(PRODUCT_URL, TARGET_SIZE, product_title)
     else:
-        logger.info(f"⏳ {TARGET_SIZE} bedeni su anda stokta bulunmuyor (Tükenmiş / Pasif).")
+        logger.info(f"⏳ {TARGET_SIZE} bedeni şu anda stokta bulunmuyor (Tükenmiş / Pasif).")
 
 
 if __name__ == "__main__":
