@@ -15,14 +15,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Ortam degiskenleri
-PRODUCT_URL = os.environ.get(
-    "PRODUCT_URL",
-    "https://www.avva.com.tr/siyah-kapusonlu-su-itici-ruzgar-gecirmez-10-dereceye-dayanikli-sisme-mont-38173"
-).strip()
+PRODUCT_URL = (
+    os.environ.get("PRODUCT_URL", "").strip()
+    or "https://www.avva.com.tr/siyah-kapusonlu-su-itici-ruzgar-gecirmez-10-dereceye-dayanikli-sisme-mont-38173"
+)
 
-TARGET_SIZE = os.environ.get("TARGET_SIZE", "L").strip().upper()
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "9175136192:AAGdTqs3slW6SVFm3nSloYepDudXwli2iZ0").strip()
-CHAT_ID = os.environ.get("CHAT_ID", "").strip()
+TARGET_SIZE = (os.environ.get("TARGET_SIZE", "").strip() or "L").upper()
+
+TELEGRAM_TOKEN = (
+    os.environ.get("TELEGRAM_TOKEN", "").strip()
+    or "9175136192:AAGdTqs3slW6SVFm3nSloYepDudXwli2iZ0"
+)
+
+CHAT_ID = os.environ.get("CHAT_ID", "").strip() or "1531910597"
 
 OUT_OF_STOCK_CLASSES = {
     "passive",
